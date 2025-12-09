@@ -2,14 +2,16 @@ import streamlit as st
 from huggingface_hub import InferenceClient
 import base64
 import io
+import time  # 待機用に時間を操るライブラリを追加
 from PIL import Image
 
 # --- 設定 ---
+# モデル: StabilityAI Stable Diffusion 2 Inpainting
 MODEL_ID = "stabilityai/stable-diffusion-2-inpainting"
 
 # --- ページ設定 ---
 st.set_page_config(page_title="AI背景拡張", layout="wide")
-st.title("🎨 AI広告画像メーカー (サイズ指定版)")
+st.title("🎨 AI広告画像メーカー (自動リトライ版)")
 st.markdown("画像をドロップすると、指定したサイズに合わせてAIが背景を拡張します。")
 
 # --- SecretsからAPIキーを読み込み ---
@@ -27,19 +29,17 @@ def image_to_base64(img):
 
 # --- 関数: AIによる背景拡張 ---
 def ai_expand(api_token, image, target_w, target_h):
-    # 【重要】無料APIのための安全策
-    # 生成サイズが大きすぎるとエラーになるので、最大1024px以下に抑えて生成し、
-    # 最後に本来のサイズに拡大して戻すロジック
+    # エラー対策: 生成サイズが大きすぎると無料枠では落ちるので
+    # 最大1024px以下に抑えて生成し、最後に本来のサイズに戻す
     gen_w, gen_h = target_w, target_h
     scale_factor = 1.0
 
     if target_w > 1024 or target_h > 1024:
-        # どちらかが1024を超えていたら、半分サイズで生成する
-        scale_factor = 0.5
+        scale_factor = 0.6 # 少し画質を落として成功率を上げる
         gen_w = int(target_w * scale_factor)
         gen_h = int(target_h * scale_factor)
     
-    # 1. 生成用キャンバス作成
+    # 1. キャンバス作成
     orig_w, orig_h = image.size
     scale = min(gen_w / orig_w, gen_h / orig_h)
     new_w = int(orig_w * scale)
@@ -56,7 +56,7 @@ def ai_expand(api_token, image, target_w, target_h):
     mask_keep = Image.new("L", (new_w, new_h), 0)
     mask.paste(mask_keep, (paste_x, paste_y))
     
-    # 3. APIリクエスト
+    # 3. APIリクエスト準備
     client = InferenceClient(token=api_token)
     payload = {
         "inputs": "high quality background, seamless extension, photorealistic, 4k, cinematic lighting, no text",
@@ -69,65 +69,5 @@ def ai_expand(api_token, image, target_w, target_h):
         }
     }
 
-    try:
-        # AI生成実行（縮小サイズで）
-        image_bytes = client.post(json=payload, model=MODEL_ID)
-        generated_img = Image.open(io.BytesIO(image_bytes))
-
-        # もし生成サイズを縮小していたら、ここで本来のサイズに引き伸ばす
-        if scale_factor != 1.0:
-            generated_img = generated_img.resize((target_w, target_h), Image.LANCZOS)
-            
-        return generated_img
-
-    except Exception as e:
-        return None
-
-# --- メイン処理 ---
-uploaded_file = st.file_uploader("ここに画像をドラッグ＆ドロップしてください", type=['jpg', 'png'])
-
-if uploaded_file:
-    input_image = Image.open(uploaded_file).convert("RGB")
-    st.image(input_image, caption="元の画像", width=200)
-    st.divider()
-    
-    st.write("🚀 **自動生成を開始しました...**")
-    
-    # ▼▼▼ サイズ変更はここを書き換えるだけ！ ▼▼▼
-    # (幅, 高さ, "ラベル名") の順番です
-    targets = [
-        (1080, 1080, "正方形 (Instagram)"), 
-        (1920, 1080, "横長 (YouTube/Web)"), 
-        (600, 400, "バナー (広告)")
-    ]
-    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-    
-    cols = st.columns(len(targets))
-    progress_bar = st.progress(0)
-    
-    for i, (w, h, label) in enumerate(targets):
-        with cols[i]:
-            status_text = st.empty()
-            status_text.info(f"⏳ {label} ({w}x{h})...")
-            
-            result_img = ai_expand(api_token, input_image, w, h)
-            
-            if result_img:
-                status_text.empty()
-                st.image(result_img, use_container_width=True)
-                
-                buf = io.BytesIO()
-                result_img.save(buf, format="JPEG", quality=95)
-                st.download_button(
-                    label="保存",
-                    data=buf.getvalue(),
-                    file_name=f"ai_bg_{w}x{h}.jpg",
-                    mime="image/jpeg",
-                    key=f"btn_{i}"
-                )
-            else:
-                status_text.error("生成失敗(混雑中)")
-        
-        progress_bar.progress((i + 1) / len(targets))
-
-    st.success("🎉 すべて完了しました！")
+    # ★ここから改良点: 粘り強くリトライするループ★
+    max_retries = 3  # 最大3回挑戦する
