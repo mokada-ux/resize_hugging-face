@@ -5,7 +5,7 @@ import io
 from PIL import Image
 
 # --- 設定 ---
-# 【修正】URLを新しいアドレス(router.huggingface.co)に変更しました
+# APIのURL (Hugging Faceの新URL)
 API_URL = "https://router.huggingface.co/models/runwayml/stable-diffusion-inpainting"
 
 # --- ページ設定 ---
@@ -52,22 +52,63 @@ def ai_expand(api_token, image, target_w, target_h):
     # 3. APIリクエスト
     headers = {"Authorization": f"Bearer {api_token}"}
     
-    # 画像を文字列(Base64)に変換してJSONに入れる
     payload = {
         "inputs": "high quality background, seamless extension, photorealistic, 4k, cinematic lighting, no text",
         "parameters": {
             "negative_prompt": "text, watermark, low quality, distorted, blurry, ugly, bad anatomy, frame, borders",
             "num_inference_steps": 25,
             "guidance_scale": 7.5,
-            # Inpainting専用のパラメータ
             "image": image_to_base64(background),
             "mask_image": image_to_base64(mask)
         }
     }
 
+    # ★ここがエラーの原因だった箇所です（tryとexceptはセットである必要があります）
     try:
         response = requests.post(API_URL, headers=headers, json=payload)
         
         # エラーチェック
         if response.status_code != 200:
             st.error(f"APIエラー: {response.text}")
+            return None
+            
+        # 画像データを読み込む
+        image_bytes = response.content
+        return Image.open(io.BytesIO(image_bytes))
+
+    except Exception as e:
+        st.error(f"通信エラー: {e}")
+        return None
+
+# --- メイン処理 ---
+uploaded_file = st.file_uploader("画像をアップロード", type=['jpg', 'png'])
+
+if uploaded_file:
+    input_image = Image.open(uploaded_file).convert("RGB")
+    st.image(input_image, caption="元の画像", width=300)
+    st.divider()
+    
+    if st.button("🚀 AI生成開始 (約20〜30秒かかります)"):
+        targets = [
+            (512, 512, "正方形"), 
+            (768, 432, "横長"), 
+            (600, 400, "バナー")
+        ]
+        
+        cols = st.columns(3)
+        
+        for i, (w, h, label) in enumerate(targets):
+            with cols[i]:
+                st.write(f"⏳ {label}...")
+                result_img = ai_expand(api_token, input_image, w, h)
+                
+                if result_img:
+                    st.image(result_img, use_container_width=True)
+                    buf = io.BytesIO()
+                    result_img.save(buf, format="JPEG", quality=95)
+                    st.download_button(
+                        label="保存",
+                        data=buf.getvalue(),
+                        file_name=f"ai_bg_{w}x{h}.jpg",
+                        mime="image/jpeg"
+                    )
