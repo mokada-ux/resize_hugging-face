@@ -1,10 +1,12 @@
 import streamlit as st
-from huggingface_hub import InferenceClient
-from PIL import Image
+import requests
+import base64
 import io
+from PIL import Image
 
 # --- 設定 ---
-MODEL_ID = "runwayml/stable-diffusion-inpainting"
+# 安定して動くInpaintingモデル
+API_URL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-inpainting"
 
 # --- ページ設定 ---
 st.set_page_config(page_title="AI背景拡張", layout="wide")
@@ -14,20 +16,24 @@ st.markdown("""
 Hugging Faceの無料APIを使用しています。
 """)
 
-# --- 【変更点】SecretsからAPIキーを自動読み込み ---
+# --- SecretsからAPIキーを読み込み ---
 try:
-    # Streamlit CloudのSecretsから取得
     api_token = st.secrets["HF_TOKEN"]
 except Exception:
     st.error("⚠️ 設定エラー: APIトークンが見つかりません。Streamlit CloudのSettings > Secrets に 'HF_TOKEN' を設定してください。")
-    st.stop() # キーがない場合はここで停止
+    st.stop()
+
+# --- 便利関数: 画像をBase64(文字)に変換 ---
+def image_to_base64(img):
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 # --- 関数: AIによる背景拡張 ---
 def ai_expand(api_token, image, target_w, target_h):
-    client = InferenceClient(token=api_token)
     orig_w, orig_h = image.size
     
-    # 1. キャンバス作成
+    # 1. キャンバス作成（リサイズして中央配置）
     scale = min(target_w / orig_w, target_h / orig_h)
     new_w = int(orig_w * scale)
     new_h = int(orig_h * scale)
@@ -38,30 +44,42 @@ def ai_expand(api_token, image, target_w, target_h):
     paste_y = (target_h - new_h) // 2
     background.paste(resized_img, (paste_x, paste_y))
     
-    # 2. マスク作成
-    mask = Image.new("L", (target_w, target_h), 255)
+    # 2. マスク作成（白=描き直す、黒=残す）
+    # Inpainting用マスク: 描き直したい場所を白(255)、残したい場所を黒(0)にする
+    mask = Image.new("L", (target_w, target_h), 255) 
     mask_keep = Image.new("L", (new_w, new_h), 0)
     mask.paste(mask_keep, (paste_x, paste_y))
     
-    # 3. 生成リクエスト
-    prompt = "high quality background, seamless extension, photorealistic, 4k, cinematic lighting, no text"
-    negative_prompt = "text, watermark, low quality, distorted, blurry, ugly, bad anatomy, frame, borders"
+    # 3. APIリクエスト（requestsを使って直接送信）
+    headers = {"Authorization": f"Bearer {api_token}"}
+    
+    # 画像を文字列(Base64)に変換してJSONに入れる
+    payload = {
+        "inputs": "high quality background, seamless extension, photorealistic, 4k, cinematic lighting, no text",
+        "parameters": {
+            "negative_prompt": "text, watermark, low quality, distorted, blurry, ugly, bad anatomy, frame, borders",
+            "num_inference_steps": 25,
+            "guidance_scale": 7.5,
+            # Inpainting専用のパラメータ
+            "image": image_to_base64(background),
+            "mask_image": image_to_base64(mask)
+        }
+    }
 
     try:
-        output_image = client.text_to_image(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            image=background,
-            mask_image=mask,
-            model=MODEL_ID,
-            height=target_h,
-            width=target_w,
-            num_inference_steps=25,
-            guidance_scale=7.5,
-        )
-        return output_image
+        response = requests.post(API_URL, headers=headers, json=payload)
+        
+        # エラーチェック
+        if response.status_code != 200:
+            st.error(f"APIエラー: {response.text}")
+            return None
+            
+        # 画像データを読み込む
+        image_bytes = response.content
+        return Image.open(io.BytesIO(image_bytes))
+
     except Exception as e:
-        st.error(f"生成エラー: {e}")
+        st.error(f"通信エラー: {e}")
         return None
 
 # --- メイン処理 ---
@@ -69,11 +87,11 @@ uploaded_file = st.file_uploader("画像をアップロード", type=['jpg', 'pn
 
 if uploaded_file:
     input_image = Image.open(uploaded_file).convert("RGB")
-    
+    st.image(input_image, caption="元の画像", width=300)
     st.divider()
     
-    if st.button("🚀 AI生成開始"):
-        # 安全のためサイズは控えめに
+    if st.button("🚀 AI生成開始 (約20〜30秒かかります)"):
+        # 無料APIの制限を考慮して、サイズは控えめに設定
         targets = [
             (512, 512, "正方形"), 
             (768, 432, "横長"), 
