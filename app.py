@@ -5,8 +5,8 @@ import io
 from PIL import Image
 
 # --- 設定 ---
-# 安定して動くInpaintingモデル
-API_URL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-inpainting"
+# 【修正】URLを新しいアドレス(router.huggingface.co)に変更しました
+API_URL = "https://router.huggingface.co/models/runwayml/stable-diffusion-inpainting"
 
 # --- ページ設定 ---
 st.set_page_config(page_title="AI背景拡張", layout="wide")
@@ -45,12 +45,11 @@ def ai_expand(api_token, image, target_w, target_h):
     background.paste(resized_img, (paste_x, paste_y))
     
     # 2. マスク作成（白=描き直す、黒=残す）
-    # Inpainting用マスク: 描き直したい場所を白(255)、残したい場所を黒(0)にする
     mask = Image.new("L", (target_w, target_h), 255) 
     mask_keep = Image.new("L", (new_w, new_h), 0)
     mask.paste(mask_keep, (paste_x, paste_y))
     
-    # 3. APIリクエスト（requestsを使って直接送信）
+    # 3. APIリクエスト
     headers = {"Authorization": f"Bearer {api_token}"}
     
     # 画像を文字列(Base64)に変換してJSONに入れる
@@ -72,46 +71,3 @@ def ai_expand(api_token, image, target_w, target_h):
         # エラーチェック
         if response.status_code != 200:
             st.error(f"APIエラー: {response.text}")
-            return None
-            
-        # 画像データを読み込む
-        image_bytes = response.content
-        return Image.open(io.BytesIO(image_bytes))
-
-    except Exception as e:
-        st.error(f"通信エラー: {e}")
-        return None
-
-# --- メイン処理 ---
-uploaded_file = st.file_uploader("画像をアップロード", type=['jpg', 'png'])
-
-if uploaded_file:
-    input_image = Image.open(uploaded_file).convert("RGB")
-    st.image(input_image, caption="元の画像", width=300)
-    st.divider()
-    
-    if st.button("🚀 AI生成開始 (約20〜30秒かかります)"):
-        # 無料APIの制限を考慮して、サイズは控えめに設定
-        targets = [
-            (512, 512, "正方形"), 
-            (768, 432, "横長"), 
-            (600, 400, "バナー")
-        ]
-        
-        cols = st.columns(3)
-        
-        for i, (w, h, label) in enumerate(targets):
-            with cols[i]:
-                st.write(f"⏳ {label}...")
-                result_img = ai_expand(api_token, input_image, w, h)
-                
-                if result_img:
-                    st.image(result_img, use_container_width=True)
-                    buf = io.BytesIO()
-                    result_img.save(buf, format="JPEG", quality=95)
-                    st.download_button(
-                        label="保存",
-                        data=buf.getvalue(),
-                        file_name=f"ai_bg_{w}x{h}.jpg",
-                        mime="image/jpeg"
-                    )
